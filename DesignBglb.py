@@ -56,6 +56,56 @@ def ensure_object_mode():
     if bpy.context.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
 
+def frame_all_objects():
+    """Frame all objects in the viewport so everything is visible."""
+    ensure_object_mode()
+    
+    # Select all mesh objects
+    bpy.ops.object.select_all(action='DESELECT')
+    mesh_objects = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+    
+    if not mesh_objects:
+        return
+    
+    # Select all mesh objects
+    for obj in mesh_objects:
+        obj.select_set(True)
+    
+    # Set active object
+    if mesh_objects:
+        bpy.context.view_layer.objects.active = mesh_objects[0]
+    
+    # Frame selected objects in all 3D viewports
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            # Set the area as context
+            override = bpy.context.copy()
+            override['area'] = area
+            override['region'] = area.regions[-1]  # Usually the main region
+            
+            # Try to frame selected
+            try:
+                bpy.ops.view3d.view_selected(override)
+            except:
+                # Fallback: view all
+                try:
+                    bpy.ops.view3d.view_all(override)
+                except:
+                    pass
+    
+    # Also ensure we're in material preview or rendered view mode for better visibility
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    # Set shading to material preview to see textures
+                    if hasattr(space.shading, 'type'):
+                        space.shading.type = 'MATERIAL'
+                        # Also enable color in viewport
+                        if hasattr(space.shading, 'color_type'):
+                            space.shading.color_type = 'MATERIAL'
+                    break
+
 def apply_all_transforms(obj):
     ensure_object_mode()
     bpy.ops.object.select_all(action='DESELECT')
@@ -83,11 +133,16 @@ def create_laminate_material(name, base_color, roughness, specular):
     bsdf.inputs["Roughness"].default_value = roughness
     
     # Handle Blender version differences: 4.0+ uses "Specular IOR Level" instead of "Specular"
-    if "Specular" in bsdf.inputs:
+    # Use try/except for safer checking
+    try:
         bsdf.inputs["Specular"].default_value = specular
-    elif "Specular IOR Level" in bsdf.inputs:
-        # Convert specular to IOR level (approximate conversion)
-        bsdf.inputs["Specular IOR Level"].default_value = specular
+    except KeyError:
+        try:
+            # Blender 4.0+ uses "Specular IOR Level"
+            bsdf.inputs["Specular IOR Level"].default_value = specular
+        except KeyError:
+            # If neither exists, just skip (some versions may not have it)
+            pass
     
     bsdf.inputs["Metallic"].default_value = 0.0
 
@@ -98,6 +153,11 @@ def create_marker_material(marker_id, image_path):
     name = f"Marker_{marker_id}"
     mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     mat.use_nodes = True
+    
+    # Ensure material is visible in viewport
+    mat.use_backface_culling = False
+    mat.blend_method = 'OPAQUE'
+    
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
 
@@ -105,15 +165,19 @@ def create_marker_material(marker_id, image_path):
     bsdf = nodes.get("Principled BSDF") or nodes.new("ShaderNodeBsdfPrincipled")
     out  = nodes.get("Material Output") or nodes.new("ShaderNodeOutputMaterial")
 
-    bsdf.inputs["Roughness"].default_value = 0.35
-    
-    # Handle Blender version differences: 4.0+ uses "Specular IOR Level" instead of "Specular"
-    if "Specular" in bsdf.inputs:
-        bsdf.inputs["Specular"].default_value = 0.40
-    elif "Specular IOR Level" in bsdf.inputs:
-        bsdf.inputs["Specular IOR Level"].default_value = 0.40
-    
+    # Make marker material flat and non-reflective so checkerboard appears clearly on white background
+    bsdf.inputs["Roughness"].default_value = 1.0  # Maximum roughness = completely matte
     bsdf.inputs["Metallic"].default_value = 0.0
+    
+    # Minimize specular to avoid weird shading
+    try:
+        bsdf.inputs["Specular"].default_value = 0.0  # No specular highlights
+    except KeyError:
+        try:
+            # Blender 4.0+ uses "Specular IOR Level"
+            bsdf.inputs["Specular IOR Level"].default_value = 0.0
+        except KeyError:
+            pass
 
     tex = nodes.get("MarkerImage")
     if tex is None:
@@ -128,11 +192,13 @@ def create_marker_material(marker_id, image_path):
     
     try:
         img = bpy.data.images.load(image_path, check_existing=True)
+        print(f"  ✓ Loaded marker image: {os.path.basename(image_path)}")
     except Exception as e:
         raise RuntimeError(f"Could not load marker image: {image_path}\nError: {e}")
 
     tex.image = img
     tex.interpolation = 'Closest'  # keep marker crisp
+    # Use UV coordinates (default) - we'll set them correctly in make_marker_plane
 
     # connect image->base color (remove old links first)
     for l in list(links):
@@ -170,11 +236,16 @@ def plane_rotation_from_normal(n: Vector):
     return q.to_euler()
 
 def make_marker_plane(marker_id, location, normal_world, size_mm):
+    print(f"Creating marker {marker_id} at location {location}, size {size_mm}mm")
     mat = create_marker_material(marker_id, MARKER_PATHS[marker_id])
 
     bpy.ops.mesh.primitive_plane_add(size=1.0, location=location)
     plane = bpy.context.active_object
     plane.name = f"MarkerPlane_{marker_id}"
+    
+    # Ensure plane is visible
+    plane.hide_viewport = False
+    plane.hide_render = False
 
     size_m = size_mm / 1000.0
     plane.scale = (size_m/2.0, size_m/2.0, 1.0)
@@ -183,25 +254,85 @@ def make_marker_plane(marker_id, location, normal_world, size_mm):
     plane.rotation_euler = plane_rotation_from_normal(normal_world)
     apply_all_transforms(plane)
 
-    # UV unwrap (simple planar)
+    # UV unwrap - create clean flat mapping without distortion
+    # Set UVs directly to ensure flat, undistorted texture mapping
     ensure_object_mode()
-    bpy.ops.object.select_all(action='DESELECT')
-    plane.select_set(True)
-    bpy.context.view_layer.objects.active = plane
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    # Use smart_project as fallback if project_from_view fails
-    try:
-        bpy.ops.uv.project_from_view(orthographic=True)
-    except:
-        # Fallback to smart project if view-based projection fails
-        bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.0)
-    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    mesh = plane.data
+    # Ensure we have a UV layer
+    if not mesh.uv_layers:
+        mesh.uv_layers.new()
+    
+    uv_layer = mesh.uv_layers.active
+    
+    # After all transforms, the plane should be a simple quad
+    # Set UVs to a simple 0-1 mapping: bottom-left=(0,0), bottom-right=(1,0), top-right=(1,1), top-left=(0,1)
+    # We need to find which vertices correspond to which corners
+    if len(mesh.vertices) >= 4 and len(uv_layer.data) >= 4:
+        # Get vertex positions in local space
+        verts = [(i, mesh.vertices[i].co) for i in range(4)]
+        
+        # Find the dominant plane (the one with smallest variation)
+        # After rotation, the plane should be mostly flat in one axis
+        verts_array = [v[1] for v in verts]
+        ranges = [
+            max(v.x for v in verts_array) - min(v.x for v in verts_array),
+            max(v.y for v in verts_array) - min(v.y for v in verts_array),
+            max(v.z for v in verts_array) - min(v.z for v in verts_array)
+        ]
+        
+        # The two axes with largest ranges are the plane's axes
+        # The axis with smallest range is the normal (should be ~0)
+        axis_order = sorted(enumerate(ranges), key=lambda x: x[1], reverse=True)
+        u_axis_idx = axis_order[0][0]  # Largest range
+        v_axis_idx = axis_order[1][0]  # Second largest
+        
+        # Extract coordinates along the two dominant axes
+        coords_2d = []
+        for i, vert in verts:
+            if u_axis_idx == 0:
+                u_coord = vert.x
+            elif u_axis_idx == 1:
+                u_coord = vert.y
+            else:
+                u_coord = vert.z
+                
+            if v_axis_idx == 0:
+                v_coord = vert.x
+            elif v_axis_idx == 1:
+                v_coord = vert.y
+            else:
+                v_coord = vert.z
+            coords_2d.append((i, u_coord, v_coord))
+        
+        # Normalize to 0-1 range
+        u_coords = [c[1] for c in coords_2d]
+        v_coords = [c[2] for c in coords_2d]
+        min_u, max_u = min(u_coords), max(u_coords)
+        min_v, max_v = min(v_coords), max(v_coords)
+        
+        # Set UVs
+        for i, u_val, v_val in coords_2d:
+            if abs(max_u - min_u) > 1e-6:
+                u = (u_val - min_u) / (max_u - min_u)
+            else:
+                u = 0.5
+            if abs(max_v - min_v) > 1e-6:
+                v = (v_val - min_v) / (max_v - min_v)
+            else:
+                v = 0.5
+            uv_layer.data[i].uv = (u, v)
+    
+    mesh.update()
 
     if plane.data.materials:
         plane.data.materials[0] = mat
     else:
         plane.data.materials.append(mat)
+    
+    # Ensure material is assigned and visible
+    plane.active_material = mat
+    print(f"  ✓ Created marker plane: {plane.name} at {plane.location}")
 
     return plane
 
@@ -219,7 +350,8 @@ def separate_loose_parts(obj):
 def assign_material_by_size(objects, mat_white, mat_black):
     for o in objects:
         _, mn, mx = get_world_bbox(o)
-        ext = mx - mn
+        ext = mx - mn  # ext is already in meters (Blender's native unit)
+        # Convert to mm for comparison
         ext_mm = Vector((ext.x*1000, ext.y*1000, ext.z*1000))
         max_extent = max(ext_mm.x, ext_mm.y, ext_mm.z)
         mat = mat_black if max_extent <= SMALL_PART_MAX_EXTENT_MM else mat_white
@@ -300,10 +432,33 @@ def main():
         error_msg += "\n\nPlease update the MARKER_PATHS dictionary in the script with correct file paths."
         raise FileNotFoundError(error_msg)
 
+    # Try to get selected mesh objects first
     sel = [o for o in bpy.context.selected_objects if o.type == 'MESH']
+    
+    # If nothing selected, find all mesh objects in the scene
     if not sel:
-        raise RuntimeError("Select your imported model mesh object first, then Run Script.")
-    base = sel[0]
+        all_meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+        if not all_meshes:
+            raise RuntimeError("No mesh objects found in the scene. Please import your model first.")
+        
+        # If multiple meshes found, use the largest one (by volume)
+        if len(all_meshes) > 1:
+            print(f"Found {len(all_meshes)} mesh objects. Using the largest one...")
+            # Calculate volumes and pick the largest
+            def get_volume(obj):
+                _, mn, mx = get_world_bbox(obj)
+                ext = mx - mn
+                return ext.x * ext.y * ext.z
+            
+            all_meshes.sort(key=get_volume, reverse=True)
+            base = all_meshes[0]
+            print(f"Selected: {base.name} (volume: {get_volume(base):.6f} m³)")
+        else:
+            base = all_meshes[0]
+            print(f"Using mesh object: {base.name}")
+    else:
+        base = sel[0]
+        print(f"Using selected mesh object: {base.name}")
 
     apply_all_transforms(base)
 
@@ -316,9 +471,9 @@ def main():
     )
     laminate_black = create_laminate_material(
         "Laminate_Black",
-        base_color=(0.03, 0.03, 0.03, 1.0),
-        roughness=0.55,
-        specular=0.30
+        base_color=(0.01, 0.01, 0.01, 1.0),  # Much darker black for better contrast
+        roughness=0.60,  # Slightly more rough to reduce reflections
+        specular=0.25
     )
 
     # Separate parts -> material by size
@@ -359,6 +514,8 @@ def main():
     floor_axis = guess_panel_normal_axis(floor)
     floor_n = normal_vector_from_axis(floor_axis, outward=True)
     floor_corners = panel_corners_for_face(floor, floor_axis, use_max_side=True)
+    
+    print(f"\nPlacing floor markers (axis: {floor_axis})...")
 
     make_marker_plane("6", floor_corners["BR"] + floor_n * eps_m, floor_n, MARKER_SIZE_MM)
     make_marker_plane("8", floor_corners["BL"] + floor_n * eps_m, floor_n, MARKER_SIZE_MM)
@@ -368,6 +525,7 @@ def main():
 
     # LEFT WALL: 1 top-left, 5 bottom-left
     if left_wall:
+        print(f"\nPlacing left wall markers...")
         ax = guess_panel_normal_axis(left_wall)
         n  = normal_vector_from_axis(ax, outward=True)
         c  = panel_corners_for_face(left_wall, ax, use_max_side=True)
@@ -376,16 +534,18 @@ def main():
 
     # RIGHT WALL: 4 top-right
     if right_wall:
+        print(f"\nPlacing right wall markers...")
         ax = guess_panel_normal_axis(right_wall)
         n  = normal_vector_from_axis(ax, outward=True)
         c  = panel_corners_for_face(right_wall, ax, use_max_side=True)
         make_marker_plane("4", c["TR"] + n * eps_m, n, MARKER_SIZE_MM)
 
     # SPINE markers (2 mid spine, 3 top spine)
-    # We’ll attach these to the wall that is closest to the hinge line by using its "inner" corners.
+    # We'll attach these to the wall that is closest to the hinge line by using its "inner" corners.
     # Use left wall TR as spine-ish; use right wall TL as spine-ish.
-    # If you prefer both on the same wall face, tell me and I’ll lock it.
+    # If you prefer both on the same wall face, tell me and I'll lock it.
     if left_wall:
+        print(f"\nPlacing spine markers...")
         ax = guess_panel_normal_axis(left_wall)
         n  = normal_vector_from_axis(ax, outward=True)
         c  = panel_corners_for_face(left_wall, ax, use_max_side=True)
@@ -410,14 +570,40 @@ def main():
     try:
         # Blender 5.0+ removed the 'export_images' parameter
         # For GLB format, images are automatically embedded
-        bpy.ops.export_scene.gltf(
-            filepath=EXPORT_GLB_PATH,
-            export_format='GLB',
-            export_yup=True
-        )
+        # Check Blender version to use correct export parameters
+        blender_version = bpy.app.version
+        export_kwargs = {
+            'filepath': EXPORT_GLB_PATH,
+            'export_format': 'GLB',
+            'export_yup': True,
+        }
+        
+        # Only add export_images for Blender < 5.0
+        if blender_version[0] < 5:
+            export_kwargs['export_images'] = 'EMBEDDED'
+        
+        bpy.ops.export_scene.gltf(**export_kwargs)
         print(f"✅ Exported GLB with laminate + markers: {EXPORT_GLB_PATH}")
     except Exception as e:
         raise RuntimeError(f"Failed to export GLB file: {EXPORT_GLB_PATH}\nError: {e}")
+    
+    # Count created markers
+    marker_objects = [o for o in bpy.context.scene.objects if o.name.startswith("MarkerPlane_")]
+    print(f"\n✅ Created {len(marker_objects)} marker planes:")
+    for marker_obj in marker_objects:
+        print(f"   - {marker_obj.name} at {marker_obj.location}")
+    
+    # Frame all objects in viewport so everything is visible
+    print("\nFraming viewport to show all objects...")
+    frame_all_objects()
+    
+    # Force viewport update
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            area.tag_redraw()
+    
+    print("✅ Viewport framed - all objects should now be visible")
+    print(f"💡 Tip: Switch to Material Preview or Rendered view mode to see marker textures")
 
 # Auto-run when script is executed
 if __name__ == "__main__":
