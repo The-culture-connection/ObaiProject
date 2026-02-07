@@ -1,23 +1,42 @@
 import bpy
 import math
+import os
 from mathutils import Vector, Euler
 
 # =========================
 # USER SETTINGS (EDIT THESE)
 # =========================
 
-EXPORT_GLB_PATH = r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\D9_Trihedral_WithMarkers.glb"
+# Base directory for files (update this to your actual path)
+# You can use absolute paths or relative paths from Blender's working directory
+# Examples:
+#   Windows: r"C:\Users\YourName\Documents\Project"
+#   Linux/Mac: "/home/yourname/Documents/Project"
+#   Relative: "markers" (if files are in a 'markers' subdirectory)
+BASE_DIR = r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings"
+
+# Export path (update this to your desired output location)
+# Use os.path.join() for cross-platform compatibility, or use raw strings for absolute paths
+if os.path.exists(BASE_DIR):
+    EXPORT_GLB_PATH = os.path.join(BASE_DIR, "D9_Trihedral_WithMarkers.glb")
+else:
+    # Fallback: export to current directory or update this path manually
+    EXPORT_GLB_PATH = os.path.join(os.path.expanduser("~"), "D9_Trihedral_WithMarkers.glb")
 
 # Your actual marker files + IDs
+# Update these paths to match your system. You can use:
+#   - Absolute paths: r"C:\path\to\ArucoMarker1.png" or "/home/user/ArucoMarker1.png"
+#   - Relative paths: "markers/ArucoMarker1.png"
+#   - Or use os.path.join(BASE_DIR, "ArucoMarker1.png") for cross-platform paths
 MARKER_PATHS = {
-    "1": r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\ArucoMarker1.png",
-    "2": r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\ArucoMarker2.png",
-    "3": r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\ArucoMarker3.png",
-    "4": r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\ArucoMarker4.png",
-    "5": r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\ArucoMarker5.png",
-    "6": r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\ArucoMarker6.png",
-    "7": r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\ArucoMarker7.png",
-    "8": r"C:\Users\grace\OneDrive - University of Cincinnati\Documents\Obai Project\AutoCad Drawings\ArucoMarker8.png",
+    "1": os.path.join(BASE_DIR, "ArucoMarker1.png") if os.path.exists(BASE_DIR) else "ArucoMarker1.png",
+    "2": os.path.join(BASE_DIR, "ArucoMarker2.png") if os.path.exists(BASE_DIR) else "ArucoMarker2.png",
+    "3": os.path.join(BASE_DIR, "ArucoMarker3.png") if os.path.exists(BASE_DIR) else "ArucoMarker3.png",
+    "4": os.path.join(BASE_DIR, "ArucoMarker4.png") if os.path.exists(BASE_DIR) else "ArucoMarker4.png",
+    "5": os.path.join(BASE_DIR, "ArucoMarker5.png") if os.path.exists(BASE_DIR) else "ArucoMarker5.png",
+    "6": os.path.join(BASE_DIR, "ArucoMarker6.png") if os.path.exists(BASE_DIR) else "ArucoMarker6.png",
+    "7": os.path.join(BASE_DIR, "ArucoMarker7.png") if os.path.exists(BASE_DIR) else "ArucoMarker7.png",
+    "8": os.path.join(BASE_DIR, "ArucoMarker8.png") if os.path.exists(BASE_DIR) else "ArucoMarker8.png",
 }
 
 MARKER_SIZE_MM = 10.5
@@ -103,10 +122,14 @@ def create_marker_material(marker_id, image_path):
         tex.label = "MarkerImage"
         tex.location = (-450, 0)
 
+    # Check if file exists before loading
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Marker image file not found: {image_path}\nPlease update MARKER_PATHS in the script with correct file paths.")
+    
     try:
         img = bpy.data.images.load(image_path, check_existing=True)
     except Exception as e:
-        raise RuntimeError(f"Could not load marker image: {image_path}\n{e}")
+        raise RuntimeError(f"Could not load marker image: {image_path}\nError: {e}")
 
     tex.image = img
     tex.interpolation = 'Closest'  # keep marker crisp
@@ -167,7 +190,12 @@ def make_marker_plane(marker_id, location, normal_world, size_mm):
     bpy.context.view_layer.objects.active = plane
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.uv.project_from_view(orthographic=True)
+    # Use smart_project as fallback if project_from_view fails
+    try:
+        bpy.ops.uv.project_from_view(orthographic=True)
+    except:
+        # Fallback to smart project if view-based projection fails
+        bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.0)
     bpy.ops.object.mode_set(mode='OBJECT')
 
     if plane.data.materials:
@@ -261,6 +289,17 @@ def main():
     set_scene_units_mm()
     ensure_object_mode()
 
+    # Validate marker files exist before proceeding
+    missing_files = []
+    for marker_id, path in MARKER_PATHS.items():
+        if not os.path.exists(path):
+            missing_files.append(f"Marker {marker_id}: {path}")
+    
+    if missing_files:
+        error_msg = "The following marker image files were not found:\n" + "\n".join(missing_files)
+        error_msg += "\n\nPlease update the MARKER_PATHS dictionary in the script with correct file paths."
+        raise FileNotFoundError(error_msg)
+
     sel = [o for o in bpy.context.selected_objects if o.type == 'MESH']
     if not sel:
         raise RuntimeError("Select your imported model mesh object first, then Run Script.")
@@ -284,12 +323,21 @@ def main():
 
     # Separate parts -> material by size
     parts = separate_loose_parts(base)
+    if not parts:
+        raise RuntimeError("No mesh parts found after separating loose parts. Check your model.")
+    
     assign_material_by_size(parts, laminate_white, laminate_black)
 
     # Find 3 biggest panels
     parts_sorted = sorted(parts, key=bbox_volume, reverse=True)
+    if len(parts_sorted) < 3:
+        print(f"Warning: Only found {len(parts_sorted)} parts, expected at least 3 for floor and walls.")
+    
     panels = parts_sorted[:3]
     floor, walls = pick_floor_and_walls(panels)
+    
+    if floor is None:
+        raise RuntimeError("Could not identify floor panel. Check your model structure.")
 
     # Decide which wall is "left" vs "right" by their X center
     def center_x(o):
@@ -351,14 +399,24 @@ def main():
     # (You’ll know because the marker will be between panels.)
 
     # Export GLB with embedded images
-    bpy.ops.export_scene.gltf(
-        filepath=EXPORT_GLB_PATH,
-        export_format='GLB',
-        export_images='EMBEDDED',
-        export_yup=True
-    )
-
-    print(f"✅ Exported GLB with laminate + markers: {EXPORT_GLB_PATH}")
+    # Ensure export directory exists
+    export_dir = os.path.dirname(EXPORT_GLB_PATH)
+    if export_dir and not os.path.exists(export_dir):
+        try:
+            os.makedirs(export_dir, exist_ok=True)
+        except Exception as e:
+            print(f"Warning: Could not create export directory: {export_dir}\nError: {e}")
+    
+    try:
+        bpy.ops.export_scene.gltf(
+            filepath=EXPORT_GLB_PATH,
+            export_format='GLB',
+            export_images='EMBEDDED',
+            export_yup=True
+        )
+        print(f"✅ Exported GLB with laminate + markers: {EXPORT_GLB_PATH}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to export GLB file: {EXPORT_GLB_PATH}\nError: {e}")
 
 # Auto-run when script is executed
 if __name__ == "__main__":
