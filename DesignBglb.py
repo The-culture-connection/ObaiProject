@@ -408,10 +408,11 @@ def main():
             print(f"Warning: Could not create export directory: {export_dir}\nError: {e}")
     
     try:
+        # Blender 5.0+ removed the 'export_images' parameter
+        # For GLB format, images are automatically embedded
         bpy.ops.export_scene.gltf(
             filepath=EXPORT_GLB_PATH,
             export_format='GLB',
-            export_images='EMBEDDED',
             export_yup=True
         )
         print(f"✅ Exported GLB with laminate + markers: {EXPORT_GLB_PATH}")
