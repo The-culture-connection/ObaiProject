@@ -82,12 +82,18 @@ def create_laminate_material(name, base_color, roughness, specular):
     bsdf.inputs["Base Color"].default_value = base_color
     bsdf.inputs["Roughness"].default_value = roughness
     
-    # Handle Blender version differences: 4.0+ uses "Specular IOR Level" instead of "Specular"
-    if "Specular" in bsdf.inputs:
-        bsdf.inputs["Specular"].default_value = specular
-    elif "Specular IOR Level" in bsdf.inputs:
-        # Convert specular to IOR level (approximate conversion)
+    # Handle Blender version differences: 5.0+ uses "Specular IOR Level" instead of "Specular"
+    # Use try/except to safely set the specular parameter
+    try:
+        # Try Specular IOR Level first (Blender 5.0+)
         bsdf.inputs["Specular IOR Level"].default_value = specular
+    except (KeyError, AttributeError):
+        try:
+            # Fallback to Specular (Blender 3.x/4.x)
+            bsdf.inputs["Specular"].default_value = specular
+        except (KeyError, AttributeError):
+            # Parameter doesn't exist, skip it
+            pass
     
     bsdf.inputs["Metallic"].default_value = 0.0
 
@@ -107,11 +113,19 @@ def create_marker_material(marker_id, image_path):
 
     bsdf.inputs["Roughness"].default_value = 0.35
     
-    # Handle Blender version differences: 4.0+ uses "Specular IOR Level" instead of "Specular"
-    if "Specular" in bsdf.inputs:
-        bsdf.inputs["Specular"].default_value = 0.40
-    elif "Specular IOR Level" in bsdf.inputs:
-        bsdf.inputs["Specular IOR Level"].default_value = 0.40
+    # Handle Blender version differences: 5.0+ uses "Specular IOR Level" instead of "Specular"
+    # Use try/except to safely check which parameter exists
+    try:
+        if "Specular" in bsdf.inputs.keys():
+            bsdf.inputs["Specular"].default_value = 0.40
+        elif "Specular IOR Level" in bsdf.inputs.keys():
+            bsdf.inputs["Specular IOR Level"].default_value = 0.40
+    except (KeyError, AttributeError):
+        # If neither exists, try to set Specular IOR Level directly
+        try:
+            bsdf.inputs["Specular IOR Level"].default_value = 0.40
+        except (KeyError, AttributeError):
+            pass  # Skip if parameter doesn't exist
     
     bsdf.inputs["Metallic"].default_value = 0.0
 
@@ -183,19 +197,32 @@ def make_marker_plane(marker_id, location, normal_world, size_mm):
     plane.rotation_euler = plane_rotation_from_normal(normal_world)
     apply_all_transforms(plane)
 
-    # UV unwrap (simple planar)
+    # UV unwrap (simple planar projection)
     ensure_object_mode()
     bpy.ops.object.select_all(action='DESELECT')
     plane.select_set(True)
     bpy.context.view_layer.objects.active = plane
+    
+    # Use UV unwrap that doesn't require view context
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
-    # Use smart_project as fallback if project_from_view fails
+    
+    # Try different UV unwrapping methods, starting with the most reliable
     try:
-        bpy.ops.uv.project_from_view(orthographic=True)
+        # Method 1: Lightmap pack (works well for flat planes)
+        bpy.ops.uv.lightmap_pack(PREF_CONTEXT='ALL_FACES')
     except:
-        # Fallback to smart project if view-based projection fails
-        bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.0)
+        try:
+            # Method 2: Smart project (good fallback)
+            bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.0)
+        except:
+            try:
+                # Method 3: Unwrap (basic method)
+                bpy.ops.uv.unwrap(method='ANGLE_BASED', margin=0.0)
+            except:
+                # Method 4: Simple unwrap as last resort
+                bpy.ops.uv.smart_project()
+    
     bpy.ops.object.mode_set(mode='OBJECT')
 
     if plane.data.materials:
@@ -308,6 +335,7 @@ def main():
     apply_all_transforms(base)
 
     # Laminate materials
+    # Making black more prominent with higher contrast
     laminate_white = create_laminate_material(
         "Laminate_White",
         base_color=(0.95, 0.95, 0.95, 1.0),
@@ -316,9 +344,9 @@ def main():
     )
     laminate_black = create_laminate_material(
         "Laminate_Black",
-        base_color=(0.03, 0.03, 0.03, 1.0),
-        roughness=0.55,
-        specular=0.30
+        base_color=(0.0, 0.0, 0.0, 1.0),  # Pure black for better contrast
+        roughness=0.6,  # Slightly higher roughness for less reflection
+        specular=0.25   # Lower specular for matte finish
     )
 
     # Separate parts -> material by size
