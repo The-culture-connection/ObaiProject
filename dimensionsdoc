@@ -1,0 +1,24 @@
+# Dimensions (millimeters). Format: KEY=VALUE
+# Lines starting with # are comments.
+
+# Panel sizes (if omitted, computed from checkerboard + margins)
+PANEL_W=108.0
+PANEL_H=94.0
+PANEL_THICK=0.8
+
+# Checkerboard layout
+CHECKER_COLS=6
+CHECKER_ROWS=5
+SQUARE_SIZE=14.0
+MARGIN=12.0
+
+# ArUco markers
+MARKER_SIZE=10.5
+EPS=0.05
+
+# Cutout at front edge of floor
+CUTOUT_WIDTH=20.0
+CUTOUT_DEPTH=10.0
+
+# Overlap to ensure panels intersect
+OVERLAP=0.1

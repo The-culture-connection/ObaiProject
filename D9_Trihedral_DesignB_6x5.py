@@ -22,7 +22,7 @@ MARKER_PATHS = {
 
 EXPORT_PATH = os.path.join(BASE_DIR, "D9_Trihedral_DesignB_6x5.glb")
 
-# Dimensions (mm)
+# Dimensions (mm) - defaults (can be overridden by dimensionsdoc file)
 PANEL_W = 108.0
 PANEL_H = 94.0
 PANEL_THICK = 0.8
@@ -36,6 +36,8 @@ CUTOUT_WIDTH = 20.0  # width of bottom cutout (mm)
 CUTOUT_DEPTH = 10.0  # depth of bottom cutout (mm)
 OVERLAP = 0.1  # small overlap at edges to ensure panels intersect (mm)
 
+DIMENSIONS_FILE = os.path.join(os.path.dirname(__file__), "dimensionsdoc")
+
 # =========================
 # HELPER FUNCTIONS
 # =========================
@@ -43,6 +45,75 @@ OVERLAP = 0.1  # small overlap at edges to ensure panels intersect (mm)
 def mm(x):
     """Convert millimeters to meters."""
     return x * MM_TO_M
+
+def parse_dimensions_file(path, defaults):
+    """Parse key=value pairs from a dimensions file and override defaults."""
+    if not os.path.exists(path):
+        print(f"ℹ️ Dimensions file not found: {path} (using defaults)")
+        return defaults
+
+    updates = {}
+    with open(path, "r", encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, value = line.split("=", 1)
+            elif ":" in line:
+                key, value = line.split(":", 1)
+            else:
+                continue
+            key = key.strip().upper()
+            value = value.strip()
+            if key not in defaults:
+                continue
+            default_value = defaults[key]
+            try:
+                if isinstance(default_value, int):
+                    updates[key] = int(float(value))
+                else:
+                    updates[key] = float(value)
+            except ValueError:
+                print(f"⚠️ Skipping invalid value for {key}: {value}")
+    merged = {**defaults, **updates}
+    return merged
+
+def load_dimensions():
+    """Load dimensions from dimensionsdoc and compute derived defaults."""
+    defaults = {
+        "PANEL_W": PANEL_W,
+        "PANEL_H": PANEL_H,
+        "PANEL_THICK": PANEL_THICK,
+        "CHECKER_COLS": CHECKER_COLS,
+        "CHECKER_ROWS": CHECKER_ROWS,
+        "SQUARE_SIZE": SQUARE_SIZE,
+        "MARGIN": MARGIN,
+        "MARKER_SIZE": MARKER_SIZE,
+        "EPS": EPS,
+        "CUTOUT_WIDTH": CUTOUT_WIDTH,
+        "CUTOUT_DEPTH": CUTOUT_DEPTH,
+        "OVERLAP": OVERLAP,
+    }
+    merged = parse_dimensions_file(DIMENSIONS_FILE, defaults)
+
+    active_w = merged["CHECKER_COLS"] * merged["SQUARE_SIZE"]
+    active_h = merged["CHECKER_ROWS"] * merged["SQUARE_SIZE"]
+
+    if "PANEL_W" not in merged or merged["PANEL_W"] <= 0:
+        merged["PANEL_W"] = active_w + 2 * merged["MARGIN"]
+    if "PANEL_H" not in merged or merged["PANEL_H"] <= 0:
+        merged["PANEL_H"] = active_h + 2 * merged["MARGIN"]
+
+    expected_w = active_w + 2 * merged["MARGIN"]
+    expected_h = active_h + 2 * merged["MARGIN"]
+    if abs(merged["PANEL_W"] - expected_w) > 0.1 or abs(merged["PANEL_H"] - expected_h) > 0.1:
+        print(
+            "⚠️ Panel size does not match checker area + margins. "
+            f"Expected {expected_w:.2f}×{expected_h:.2f}mm, got {merged['PANEL_W']:.2f}×{merged['PANEL_H']:.2f}mm."
+        )
+
+    return merged
 
 def ensure_object_mode():
     if bpy.context.mode != 'OBJECT':
@@ -353,8 +424,9 @@ def add_back_wall():
     # Actually: inside face is at the back (smaller y), so corner at y = PANEL_H - OVERLAP, 
     # and inside face is at y = PANEL_H - OVERLAP. But we want it at y = PANEL_H.
     # So: corner at y = PANEL_H, inside face at y = PANEL_H, panel extends to y = PANEL_H + PANEL_THICK + OVERLAP
-    corner = Vector((0, mm(PANEL_H), mm(PANEL_THICK)))  # Inside face at y = PANEL_H
-    size = Vector((mm(PANEL_W + OVERLAP), mm(PANEL_THICK + OVERLAP), mm(PANEL_H)))  # Extend in +Y and +X to overlap
+    wall_z = max(0.0, PANEL_THICK - OVERLAP)
+    corner = Vector((0, mm(PANEL_H), mm(wall_z)))  # Inside face at y = PANEL_H
+    size = Vector((mm(PANEL_W + OVERLAP), mm(PANEL_THICK + OVERLAP), mm(PANEL_H + OVERLAP)))  # Extend in +Y/+X/+Z
     return add_box_from_corner("BackWall", corner, size)
 
 def add_right_wall():
@@ -369,8 +441,9 @@ def add_right_wall():
     Extended slightly at back edge (y) to overlap with back wall, and extends into floor.
     """
     # Inside face must be at x = PANEL_W, so panel extends from x = PANEL_W to x = PANEL_W + PANEL_THICK + OVERLAP
-    corner = Vector((mm(PANEL_W), 0, mm(PANEL_THICK)))  # Inside face at x = PANEL_W
-    size = Vector((mm(PANEL_THICK + OVERLAP), mm(PANEL_H + OVERLAP), mm(PANEL_H)))  # Extend in +X and +Y to overlap
+    wall_z = max(0.0, PANEL_THICK - OVERLAP)
+    corner = Vector((mm(PANEL_W), 0, mm(wall_z)))  # Inside face at x = PANEL_W
+    size = Vector((mm(PANEL_THICK + OVERLAP), mm(PANEL_H + OVERLAP), mm(PANEL_H + OVERLAP)))  # Extend in +X/+Y/+Z
     return add_box_from_corner("RightWall", corner, size)
 
 # =========================
@@ -603,28 +676,42 @@ def add_marker_plane(marker_id, image_path, center_point, normal_vector, size_mm
 
     return plane
 
+def corner_center(width_mm, height_mm, corner_label):
+    """Return center position for a marker in a given corner (panel coordinates)."""
+    inset = MARGIN + MARKER_SIZE / 2.0
+    max_x = width_mm - inset
+    max_y = height_mm - inset
+
+    if corner_label == "BL":
+        return inset, inset
+    if corner_label == "BR":
+        return max_x, inset
+    if corner_label == "TL":
+        return inset, max_y
+    if corner_label == "TR":
+        return max_x, max_y
+    raise ValueError(f"Unknown corner label: {corner_label}")
+
 def place_markers():
     """Place all ArUco markers on panels."""
     # Floor markers on +Z face
     floor_origin = Vector((0, 0, 0))
     floor_normal = Vector((0, 0, 1))
 
-    add_marker_plane("6", MARKER_PATHS["6"],
-        panel_point(floor_origin, 'Z',
-            PANEL_W - MARGIN - MARKER_SIZE/2,
-            MARGIN + MARKER_SIZE/2),
-        floor_normal, MARKER_SIZE)
+    floor_bl = corner_center(PANEL_W, PANEL_H, "BL")
+    floor_br = corner_center(PANEL_W, PANEL_H, "BR")
+    floor_tl = corner_center(PANEL_W, PANEL_H, "TL")
 
     add_marker_plane("8", MARKER_PATHS["8"],
-        panel_point(floor_origin, 'Z',
-            MARGIN + MARKER_SIZE/2,
-            MARGIN + MARKER_SIZE/2),
+        panel_point(floor_origin, 'Z', floor_bl[0], floor_bl[1]),
+        floor_normal, MARKER_SIZE)
+
+    add_marker_plane("6", MARKER_PATHS["6"],
+        panel_point(floor_origin, 'Z', floor_br[0], floor_br[1]),
         floor_normal, MARKER_SIZE)
 
     add_marker_plane("7", MARKER_PATHS["7"],
-        panel_point(floor_origin, 'Z',
-            MARGIN + MARKER_SIZE/2,
-            PANEL_H - MARGIN - MARKER_SIZE/2),
+        panel_point(floor_origin, 'Z', floor_tl[0], floor_tl[1]),
         floor_normal, MARKER_SIZE)
 
     # Back wall: inside face is at y = PANEL_H (original position, not affected by overlap)
@@ -632,30 +719,25 @@ def place_markers():
     back_origin = Vector((0, mm(PANEL_H), mm(PANEL_THICK)))
     back_normal = Vector((0, -1, 0))
 
-    add_marker_plane("1", MARKER_PATHS["1"],
-        panel_point(back_origin, 'Y',
-            MARGIN + MARKER_SIZE/2,
-            PANEL_H - MARGIN - MARKER_SIZE/2),
-        back_normal, MARKER_SIZE)
+    back_bl = corner_center(PANEL_W, PANEL_H, "BL")
+    back_br = corner_center(PANEL_W, PANEL_H, "BR")
+    back_tl = corner_center(PANEL_W, PANEL_H, "TL")
+    back_tr = corner_center(PANEL_W, PANEL_H, "TR")
 
     add_marker_plane("5", MARKER_PATHS["5"],
-        panel_point(back_origin, 'Y',
-            MARGIN + MARKER_SIZE/2,
-            MARGIN + MARKER_SIZE/2),
+        panel_point(back_origin, 'Y', back_bl[0], back_bl[1]),
         back_normal, MARKER_SIZE)
 
-    x_spine = PANEL_W - MARGIN - MARKER_SIZE/2
-
-    add_marker_plane("3", MARKER_PATHS["3"],
-        panel_point(back_origin, 'Y',
-            x_spine,
-            PANEL_H - MARGIN - MARKER_SIZE/2),
+    add_marker_plane("1", MARKER_PATHS["1"],
+        panel_point(back_origin, 'Y', back_tl[0], back_tl[1]),
         back_normal, MARKER_SIZE)
 
     add_marker_plane("2", MARKER_PATHS["2"],
-        panel_point(back_origin, 'Y',
-            x_spine,
-            PANEL_H * 0.5),
+        panel_point(back_origin, 'Y', back_br[0], back_br[1]),
+        back_normal, MARKER_SIZE)
+
+    add_marker_plane("3", MARKER_PATHS["3"],
+        panel_point(back_origin, 'Y', back_tr[0], back_tr[1]),
         back_normal, MARKER_SIZE)
 
     # Right wall: inside face is at x = PANEL_W (original position, not affected by overlap)
@@ -663,10 +745,10 @@ def place_markers():
     right_origin = Vector((mm(PANEL_W), 0, mm(PANEL_THICK)))
     right_normal = Vector((-1, 0, 0))
 
+    right_tr = corner_center(PANEL_H, PANEL_H, "TR")
+
     add_marker_plane("4", MARKER_PATHS["4"],
-        panel_point(right_origin, 'X',
-            PANEL_H - MARGIN - MARKER_SIZE/2,  # u along Y now, so max is PANEL_H
-            PANEL_H - MARGIN - MARKER_SIZE/2), # v along Z, max is PANEL_H
+        panel_point(right_origin, 'X', right_tr[0], right_tr[1]),
         right_normal, MARKER_SIZE)
 
 # =========================
@@ -706,6 +788,23 @@ def set_viewport_to_material_preview():
 # =========================
 
 def main():
+    global PANEL_W, PANEL_H, PANEL_THICK, CHECKER_COLS, CHECKER_ROWS
+    global SQUARE_SIZE, MARGIN, MARKER_SIZE, EPS, CUTOUT_WIDTH, CUTOUT_DEPTH, OVERLAP
+
+    dims = load_dimensions()
+    PANEL_W = dims["PANEL_W"]
+    PANEL_H = dims["PANEL_H"]
+    PANEL_THICK = dims["PANEL_THICK"]
+    CHECKER_COLS = dims["CHECKER_COLS"]
+    CHECKER_ROWS = dims["CHECKER_ROWS"]
+    SQUARE_SIZE = dims["SQUARE_SIZE"]
+    MARGIN = dims["MARGIN"]
+    MARKER_SIZE = dims["MARKER_SIZE"]
+    EPS = dims["EPS"]
+    CUTOUT_WIDTH = dims["CUTOUT_WIDTH"]
+    CUTOUT_DEPTH = dims["CUTOUT_DEPTH"]
+    OVERLAP = dims["OVERLAP"]
+
     # Validate marker files
     missing = [p for p in MARKER_PATHS.values() if not os.path.exists(p)]
     if missing:
